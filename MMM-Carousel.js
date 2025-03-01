@@ -8,6 +8,7 @@ Module.register("MMM-Carousel", {
     slideFadeInSpeed: 1000,
     slideFadeOutSpeed: 1000,
     ignoreModules: [],
+    skipEmptyModules: true, // New option to control empty module skipping
     mode: "global", // global || positional || slides
     top_bar: {
       enabled: false,
@@ -259,6 +260,7 @@ Module.register("MMM-Carousel", {
     modules.showPageControls = this.config.showPageControls;
     modules.slideFadeInSpeed = this.config.slideFadeInSpeed;
     modules.slideFadeOutSpeed = this.config.slideFadeOutSpeed;
+    modules.skipEmptyModules = this.config.skipEmptyModules;
     this.moduleTransition.call(modules);
 
     // Reference to function for manual transitions
@@ -291,6 +293,125 @@ Module.register("MMM-Carousel", {
       resetCurrentIndex = Object.keys(this.slides).length;
     }
 
+    // Helper function to check if a module's DOM is empty
+    const isModuleEmpty = (module) => {
+      // Add debug logging to help diagnose the issue
+      Log.debug(`[MMM-Carousel] Checking if module ${module.name} is empty`);
+      
+      // Get the module's DOM element properly
+      const moduleElement = document.getElementById(module.identifier);
+      if (!moduleElement) {
+        Log.debug(`[MMM-Carousel] Module ${module.name} DOM element not found, considering empty`);
+        return true;
+      }
+      
+      // For MMM-MyScoreboard, do a specific check for empty scoreboards
+      if (module.name === "MMM-MyScoreboard") {
+        // Log what we're finding to help debug
+        const tables = moduleElement.querySelectorAll("table");
+        Log.debug(`[MMM-Carousel] Found ${tables.length} tables in MyScoreboard`);
+        
+        // Check for no data message which indicates empty scoreboard
+        const noGames = moduleElement.querySelectorAll(".no-games-message");
+        if (noGames && noGames.length > 0) {
+          Log.debug(`[MMM-Carousel] Found 'no games' message in MyScoreboard, considering empty`);
+          return true;
+        }
+        
+        // If it has any tables at all with content, consider it non-empty
+        if (tables.length > 0) {
+          // Extra check to see if tables actually have content
+          for (let i = 0; i < tables.length; i++) {
+            if (tables[i].rows.length > 1) { // More than just a header row
+              return false;
+            }
+          }
+        }
+        
+        // Check for any substantial content
+        const content = moduleElement.textContent ? moduleElement.textContent.trim() : "";
+        if (content !== "" && 
+            !content.includes("No games") && 
+            !content.includes("Loading") && 
+            content.length > 15) {
+          return false;
+        }
+        
+        return true;
+      }
+      
+      // For all other modules, check if there's visible content
+      // First, check if the module is hidden by CSS
+      const style = window.getComputedStyle(moduleElement);
+      if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+        return true;
+      }
+      
+      // Then check for actual content
+      const hasContent = moduleElement.innerHTML && 
+                         moduleElement.innerHTML.trim() !== "" &&
+                         moduleElement.offsetHeight > 10; // Height threshold to ignore tiny elements
+      
+      return !hasContent;
+    };
+
+    // Function to find the next non-empty index
+    const findNextNonEmptyIndex = (startIdx, direction = 1) => {
+      if (!this.skipEmptyModules) {
+        // If not skipping empty modules, just return the next index
+        return (startIdx + direction + resetCurrentIndex) % resetCurrentIndex;
+      }
+      
+      let checkedCount = 0;
+      let currentIdx = startIdx;
+      
+      // Loop through indices until we find a non-empty one or check all
+      while (checkedCount < resetCurrentIndex) {
+        // Move to next index in the specified direction
+        currentIdx = (currentIdx + direction + resetCurrentIndex) % resetCurrentIndex;
+        checkedCount++;
+        
+        // Check if this index has content
+        if (this.slides === undefined) {
+          // In normal mode, just check if the current module has content
+          if (!isModuleEmpty(this[currentIdx])) {
+            return currentIdx;
+          }
+        } else {
+          // In slides mode, check if any module in this slide has content
+          const slideKey = Object.keys(this.slides)[currentIdx];
+          const mods = this.slides[slideKey];
+          let hasContent = false;
+          
+          // Check each module in the slide
+          for (let i = 0; i < mods.length; i++) {
+            let moduleName = mods[i];
+            if (typeof moduleName === "object" && moduleName.name) {
+              moduleName = moduleName.name;
+            }
+            
+            // Find the module in our array
+            for (let j = 0; j < this.length; j++) {
+              if (this[j].name === moduleName) {
+                if (!isModuleEmpty(this[j])) {
+                  hasContent = true;
+                  break;
+                }
+              }
+            }
+            if (hasContent) break;
+          }
+          
+          if (hasContent) {
+            return currentIdx;
+          }
+        }
+      }
+      
+      // If we couldn't find any non-empty module, just return the next index
+      return (startIdx + direction + resetCurrentIndex) % resetCurrentIndex;
+    };
+
     // Update the current index
     if (goToSlide) {
       Log.log(`[MMM-Carousel] In goToSlide, current slide index${this.currentIndex}`);
@@ -301,6 +422,40 @@ Module.register("MMM-Carousel", {
             noChange = true;
           } else {
             this.currentIndex = j;
+            // If we're skipping empty modules, check if this one is empty
+            if (this.skipEmptyModules) {
+              const slideKey = Object.keys(this.slides)[j];
+              const mods = this.slides[slideKey];
+              let hasContent = false;
+              
+              // Check if any module in this slide has content
+              for (let i = 0; i < mods.length; i++) {
+                let moduleName = mods[i];
+                if (typeof moduleName === "object" && moduleName.name) {
+                  moduleName = moduleName.name;
+                }
+                
+                // Find the module in our array
+                for (let k = 0; k < this.length; k++) {
+                  if (this[k].name === moduleName) {
+                    if (!isModuleEmpty(this[k])) {
+                      hasContent = true;
+                      break;
+                    }
+                  }
+                }
+                if (hasContent) break;
+              }
+              
+              // If this slide is empty, find the next non-empty one
+              if (!hasContent) {
+                this.currentIndex = findNextNonEmptyIndex(j, 1);
+                // If we looped around to the same slide, don't change
+                if (this.currentIndex === j) {
+                  noChange = true;
+                }
+              }
+            }
           }
           return true;
         }
@@ -309,23 +464,61 @@ Module.register("MMM-Carousel", {
     } else if (goToIndex === -1) {
       // Go to a specific slide?
       if (goDirection === 0) {
-        this.currentIndex += 1; // Normal Transition, Increment by 1
+        // Normal Transition, find next non-empty module
+        this.currentIndex = findNextNonEmptyIndex(this.currentIndex, 1);
       } else {
-        Log.debug(`[MMM-Carousel] Currently on slide ${this.currentIndex} and going to slide ${this.currentIndex + goDirection}`);
-        this.currentIndex += goDirection; // Told to go a specific direction
-      }
-      if (this.currentIndex >= resetCurrentIndex) {
-        // Wrap-around back to beginning
-        this.currentIndex = 0;
-      } else if (this.currentIndex < 0) {
-        this.currentIndex = resetCurrentIndex - 1; // Went too far backwards, wrap-around to end
+        // Told to go a specific direction, find next non-empty module in that direction
+        this.currentIndex = findNextNonEmptyIndex(this.currentIndex, goDirection);
       }
     } else if (goToIndex >= 0 && goToIndex < resetCurrentIndex) {
       if (goToIndex === this.currentIndex) {
         Log.debug("[MMM-Carousel] No change, requested slide is the same.");
         noChange = true;
       } else {
-        this.currentIndex = goToIndex; // Go to a specific slide if in range
+        // Go to a specific slide if in range
+        this.currentIndex = goToIndex;
+        
+        // If we're skipping empty modules and this one is empty, find next non-empty
+        if (this.skipEmptyModules) {
+          let isEmpty = false;
+          
+          if (this.slides === undefined) {
+            isEmpty = isModuleEmpty(this[this.currentIndex]);
+          } else {
+            const slideKey = Object.keys(this.slides)[this.currentIndex];
+            const mods = this.slides[slideKey];
+            isEmpty = true;
+            
+            // Check if any module in this slide has content
+            for (let i = 0; i < mods.length; i++) {
+              let moduleName = mods[i];
+              if (typeof moduleName === "object" && moduleName.name) {
+                moduleName = moduleName.name;
+              }
+              
+              // Find the module in our array
+              for (let j = 0; j < this.length; j++) {
+                if (this[j].name === moduleName) {
+                  if (!isModuleEmpty(this[j])) {
+                    isEmpty = false;
+                    break;
+                  }
+                }
+              }
+              if (!isEmpty) break;
+            }
+          }
+          
+          // If this slide is empty, find the next non-empty one
+          if (isEmpty) {
+            const originalIndex = this.currentIndex;
+            this.currentIndex = findNextNonEmptyIndex(this.currentIndex, 1);
+            // If we looped around to the same slide, don't change
+            if (this.currentIndex === originalIndex) {
+              noChange = true;
+            }
+          }
+        }
       }
     }
 
@@ -369,6 +562,7 @@ Module.register("MMM-Carousel", {
          */
         Log.debug(`[MMM-Carousel] Processing ${this[i].name}`);
         if (this.slides === undefined && i === this.currentIndex) {
+          // In standard mode, show the module (empty check happens during index selection)
           this[i].show(this.slideFadeInSpeed, false, {lockString: "mmmc"});
         } else if (this.slides !== undefined) {
           // Handle slides
@@ -377,7 +571,8 @@ Module.register("MMM-Carousel", {
           // Loop through all of the modules that are supposed to be in this slide
           for (let s = 0; s < mods.length; s += 1) {
             if (typeof mods[s] === "string" && mods[s] === this[i].name) {
-            // If only the module name is given as a string, and it matches, show the module
+              // If only the module name is given as a string, and it matches, show it
+              // (empty checking happens during index selection, not here)
               this[i].show(this.slideFadeInSpeed, false, {
                 lockString: "mmmc"
               });
@@ -388,10 +583,10 @@ Module.register("MMM-Carousel", {
               "name" in mods[s] &&
               mods[s].name === this[i].name
             ) {
-            /*
-             * If the slide definition has an object, and it's name matches the module continue
-             * check if carouselId is set (multiple module instances) and this is not the one we should show
-             */
+              /*
+               * If the slide definition has an object, and it's name matches the module continue
+               * check if carouselId is set (multiple module instances) and this is not the one we should show
+               */
               if (
                 typeof mods[s].carouselId !== "undefined" &&
                 typeof this[i].data.config.carouselId !== "undefined" &&
@@ -399,23 +594,26 @@ Module.register("MMM-Carousel", {
               ) {
                 break;
               }
+              
+              // Empty check happens during index selection, not during the show/hide phase
+              
               if (typeof mods[s].classes === "string") {
-              // Check if we have any classes we're supposed to add
+                // Check if we have any classes we're supposed to add
                 const dom = document.getElementById(this[i].identifier);
                 // Remove any classes added by this module (other slides)
                 [dom.className] = dom.className.split("mmmc");
                 if (mods[s].classes) {
-                /*
-                 * check for an empty classes tag (required to remove classes added from other slides)
-                 * If we have a valid class list, add the classes
-                 */
+                  /*
+                   * check for an empty classes tag (required to remove classes added from other slides)
+                   * If we have a valid class list, add the classes
+                   */
                   dom.classList.add("mmmc");
                   dom.classList.add(mods[s].classes);
                 }
               }
 
               if (typeof mods[s].position === "string") {
-              // Check if we were given a position to change, if so, move the module to the new position
+                // Check if we were given a position to change, if so, move the module to the new position
                 selectWrapper(mods[s].position).appendChild(document.getElementById(this[i].identifier));
               }
               // Finally show the module
